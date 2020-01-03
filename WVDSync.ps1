@@ -1,12 +1,13 @@
+
 Param (
     [parameter()]
     $AADGroup,
     [parameter()]
     $HostPoolName,
     [parameter()]
-    $WVDAppGroupName,
+    $AppGroupName,
     [parameter()]
-    $RDSTenantName,
+    $TenantName,
     [parameter()]
     $Login,
     [parameter()]
@@ -15,7 +16,7 @@ Param (
     $Automated,
     [parameter()]
     $ApplicationId
-)  
+) 
 
 
 <#
@@ -25,10 +26,10 @@ $HostPoolName = HOSTPOOL
 $WVDAppGroupName = WVD App Group
 $RDSTenantName  = RDSTenantname
 
-WVDSync.ps1 -AADGroup "App1Users" -HostPoolName "Pool1" -WVDAppGroupName "Apps1" -RDSTenantName $RDSTenantName
+WVDSync.ps1 -AADGroup "App1Users" -HostPoolName "Pool1" -AppGroupName "Apps1" -TenantName $TenantName
 
 
-.\WVDSync.ps1 -AADGroup CitrixUsers -HostPoolName $HostPoolName -WVDAppGroupName $AppGroupName -RDSTenantName $RDSTenantName -Login $true
+.\WVDSync.ps1 -AADGroup CitrixUsers -HostPoolName $HostPoolName -AppGroupName $AppGroupName -TenantName $TenantName -Login $true
 
 
 #Workings: 
@@ -74,6 +75,9 @@ write-host "     "
 write-host "This script reads the input groupname and validates / synchronizes WVD Membership" -ForegroundColor Green
 
 
+
+$DesktopApplicationGroup="WVDDesktopUsers"
+
 #Importing the functions module and primary modules for AAD and AD
 Import-Module .\WVDSync.psm1
 If (!((LoadModule -name AzureAD))){
@@ -95,29 +99,52 @@ If (!((LoadModule -name Microsoft.RDInfra.RDPowershell))){
     ActivateLogFile -LogFilePath $LogFilePathName
 
 
+
+
+
     #ProvisionAADServiceAccount
     #THIS NEEDS TO BE ADJUSTED TO ALLOW FOR MULTIPLE GROUPS TO BE ADDED TO THE SAME SCRIPT - PERHAPS A CONFIG FILE?
 If ($Provision) {
     #CANNOT PROVISION THIS SCRIPT YET
-    Write-host "ILLEGAL OPTION"
-    Exit
+    #Write-host "ILLEGAL OPTION"
+    #Exit
 
     #Need to catch if powershell is open in admin mode (as script provisions Certificates in local machine and scheduled task)
     if (!([bool](([System.Security.Principal.WindowsIdentity]::GetCurrent()).groups -match "S-1-5-32-544"))){
         Write-host "Please start powershell in admin mode for provisioning mode"
         exit
     }
-    Write-Host "Login to Azure AD with Global Admin Account"
-    If ($Login){Connect-AzureAD} 
+
+    If ($Login){
+        Write-host "The script will ask you for 2x Login" -ForegroundColor "Yellow"
+        Write-host "The first login will be the Azure AD Login must have admin privileges"  -ForegroundColor "Yellow"
+        Write-host "The second login will be the WVD/RDS Admin Login"  -ForegroundColor "Yellow"
+        Write-host "You can also specify -Login $false and login manually prior to running the script"
+        write-host "            ...Press any key to continue..."  -ForegroundColor CYAN
+        [void][System.Console]::ReadKey($true)
+        If (!(AZConnect)) {
+            WriteLog -Path $LogFilePathName -Value ("FATAL AD ERROR - EXIT") -color "Red"
+            exit    
+        }
+    
+        Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" 
+        If (!($RDSContext.TenantGroupName)) {
+            Write-HOST "ERROR LOGGING INTO RDS OR NO TENANT FOUND" -ForegroundColor "Red"
+        }
+        Write-host ("Tenant Group:" + $RDSContext.TenantGroupName)
+
+        }
     $tenant = Get-AzureADTenantDetail
 
     #Cleaning up existing certs
     $certold=Get-ChildItem cert:\localmachine\my | Where-Object {$_.Subject -eq 'CN=WVDSyncScript'} | Remove-Item
 
     #cleaning old application
-    If ($ExistingApplication=Get-AzureADApplication |Where-Object {$_.DisplayName -eq 'WVDSyncScript'}) {
+    If ([array]$ExistingApplication=Get-AzureADApplication |Where-Object {$_.DisplayName -eq 'WVDSyncScript'}) {
         WriteLog -Path $LogFilePathName -Value ("Existing application found - removing application")
-        Remove-AzureADApplication -ObjectId $ExistingApplication.ObjectId
+        ForEach ($app in $ExistingApplication) {
+            Remove-AzureADApplication -ObjectId $app.ObjectId
+        }
         Write-Host "Removed old application, need to pause for 10 seconds"
         sleep 10
 
@@ -170,6 +197,33 @@ If ($Provision) {
         Sleep 15
 
      }
+
+    Write-host "Provining Admin access to SP in RDS"
+    $NewRDSRole = $null
+    $Retries = 0;
+    While ($NewRDSRole -eq $null -and $Retries -le 6) {
+        [Array]$AllTenants=Get-RdsTenant
+        If (!($AllTenants)){
+            WriteLog -Path $LogFilePathName -Value ("FATAL ERROR - No tenants found - EXIT") -color "Red" 
+            exit
+        }else{
+            ForEach ($Tenant in $AllTenants) {
+                $AppID=$application.AppId
+                $TenantName=$Tenant.TenantName
+
+                WriteLog -Path $LogFilePathName -Value ("Adding AppID $AppId to tenant $TenantName") -color "Yellow" 
+                
+                New-RdsRoleAssignment -RoleDefinitionName "RDS Owner" -ApplicationId $application.AppId -TenantName $Tenant.TenantName    
+                $NewRDSRole =  ((Get-RdsRoleAssignment -TenantName  $Tenant.TenantName ).appId -contains $application.AppId)
+                $Retries++;
+                write-host "waiting for SP to be added to RDS group"                
+                Sleep 15
+                #Just need to sleep to provide backend to catch-up
+            }
+        }
+        
+        
+     }
     
 
     # Get Tenant Detail
@@ -187,39 +241,12 @@ If ($Provision) {
 
     $action = New-ScheduledTaskAction -Execute 'Powershell.exe' -Argument $arguments
     $trigger =  New-ScheduledTaskTrigger -Daily -At 3am
-    Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "AADtoWVDSync" -Description "Synchronizes WVD accounts daily to WVD"
+    #Register-ScheduledTask -Action $action -Trigger $trigger -TaskName "AADtoWVDSync" -Description "Synchronizes WVD accounts daily to WVD"
+    exit
 }
 #END OF AUTOMATED PROVISIONING 
 
-
-#IF running automated, the stored certificate will be used to authenicate and get the AAD Tenant. The variable -ApplicationID is used for the Service Principal.
-If ($Automated) {
-
-        #CANNOT PROVISION THIS SCRIPT YET
-        Write-host "ILLEGAL OPTION"
-        Exit
-    #If using service principal, need to login with SP
-    
-    If (!($ApplicationId)){
-        Write-host "No ApplicationID found - exit"
-        Exit
-    }
-    $cert=Get-ChildItem cert:\localmachine\my | where {$_.Subject -eq 'CN=WVDSyncScript'}
-    $thumb = $cert.Thumbprint
-    $tenantObjectID=$cert.DnsNameList.unicode
-    Connect-AzureAD -TenantId $tenantObjectID -ApplicationId $ApplicationId -CertificateThumbprint $thumb
-    $login=$false
-}
-
-
-#ActualStartOfScript
-#Creating the two arrays to be used
-
-
-$AADUPN = New-Object System.Collections.ArrayList
-$WVDUPN = New-Object System.Collections.ArrayList
-
-If ($Login) {
+If ($Login -and (!($Automated))) {
     Write-host "The script will ask you for 2x Login" -ForegroundColor "Yellow"
     Write-host "The first login will be the Azure AD Login - can be AD Reader - no need for admin privileges"  -ForegroundColor "Yellow"
     Write-host "The second login will be the WVD/RDS Admin Login"  -ForegroundColor "Yellow"
@@ -231,73 +258,265 @@ If ($Login) {
         exit    
     }
 
-    If (!(RDSConnect -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup)) {
-        WriteLog -Path $LogFilePathName -Value ("FATAL WVD ERROR - EXIT") -color "Red"
-        exit
+    $RDSContext=Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" 
+    If (!($RDSContext.TenantGroupName)) {
+        Write-HOST "ERROR LOGGING INTO RDS OR NO TENANT FOUND" -ForegroundColor "Red"
+    }
+    Write-host ("Tenant Group:" + $RDSContext.TenantGroupName)
+
     }
 
+
+
+
+#IF running automated, the stored certificate will be used to authenicate and get the AAD Tenant. The variable -ApplicationID is used for the Service Principal.
+If ($Automated) {
+
+        #CANNOT PROVISION THIS SCRIPT YET
+        #Write-host "ILLEGAL OPTION"
+        #Exit
+    #If using service principal, need to login with SP
+    
+    If (!($ApplicationId)){
+        Write-host "No ApplicationID found - exit"
+        Exit
+    }
+    $cert=Get-ChildItem cert:\localmachine\my | where {$_.Subject -eq 'CN=WVDSyncScript'}
+    $thumb = $cert.Thumbprint
+    $tenantObjectID=$cert.DnsNameList.unicode 
+    Connect-AzureAD -TenantId $tenantObjectID -ApplicationId $ApplicationId -CertificateThumbprint $thumb
+    $RDSContext=Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" -ApplicationId  $ApplicationId -CertificateThumbprint $thumb -AadTenantId $tenantObjectID
+    If (!($RDSContext)) {
+        WriteLog -Path $LogFilePathName -Value ("ERROR LOGING IN AS APP ID") -color "Red" 
+        exit
+    }
+    Write-host ("Tenant Group:" + $RDSContext.TenantGroupName)
+    
+
+
+    #Running Sequence
+    [array]$AllTenants=Get-RdsTenant
+    If (!($AllTenants)) {
+        WriteLog -Path $LogFilePathName -Value ("ERROR RETRIEVING TENANTS") -color "Red" 
+        exit
+    }else{
+        $TenantCount=$AllTenants.count
+        $ti=0
+        Foreach ($tenant in $AllTenants) {
+            $ti++
+            $TenantName=$tenant.TenantName
+            WriteLog -Path $LogFilePathName -Value ("Retrieving Hostpools in tenant $ti of $TenantCount : $TenantName") -color "DarkCyan" 
+         
+            [array]$AllHostGroups=Get-RdsHostPool -TenantName $tenant.TenantName
+            If (!($AllHostGroups)) {
+                WriteLog -Path $LogFilePathName -Value ("ERROR RETRIEVING HOSTGROUPS in Tenant $TenantName") -color "Red" 
+            }else{
+                $hi=0
+                $HostPoolCount=$AllHostGroups.count
+                ForEach ($HostGroup in $AllHostGroups) {
+                    $hi++
+                    $HostPoolName=$HostGroup.HostPoolName
+                    WriteLog -Path $LogFilePathName -Value ("Retrieving ApplicationGroups in hostpool $hi of $HostPoolCount : $HostPoolName") -color "Cyan" 
+                    $allAppGroups=Get-RdsAppGroup -TenantName $tenant.TenantName -HostPoolName $HostGroup.HostPoolName
+                    If (!($allAppGroups)) {
+                        $HostGroup=$HostGroup.HostPoolName
+                        WriteLog -Path $LogFilePathName -Value ("ERROR RETRIEVING Apps in $hostGroup") -color "Red" 
+                    }else{
+                        $ai=0
+                        $AppGroupCount=$allAppGroups.count
+                        #Per application, retrieve the description field and use that to request the sync
+                        ForEach ($appGroup in $allAppGroups) {
+                            $ai++
+                            $AppGroupName=$appGroup.AppGroupName
+                            WriteLog -Path $LogFilePathName -Value ("Retrieving Description of Application Group $ai of $AppGroupCount : $AppGroupName") -color "Gray" 
+                            $AADGroup=$null
+                            $AADGroup=$appGroup.Description
+                            If (!($AADGroup)) {
+                                WriteLog -Path $LogFilePathName -Value ("Application $AppGroupName does not have a description") -color "Yellow" 
+                                continue
+                            }else{
+                                If ($AADGroup -eq 'The default desktop application group for the session host pool'){$AADGroup=$DesktopApplicationGroup}    
+                                WriteLog -Path $LogFilePathName -Value ("  -validating AAD Group: $AADGroup ") -color "Yellow" 
+                                If (Validate-AADGroup -Group $AADGroup) {
+                                    
+                                
+                                    #Reset the arrays
+                                    $AADUsers=$null
+                                    $WVDAppUsers=$null
+
+                                    $AADUsers=GetAzureADGroupMembers -AADGroupName $AADGroup
+                                    [array]$WVDAppUsers=(Get-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName).UserPrincipalName
+                                    
+                                
+                                    If ($LogFilePathName) {
+                                    WriteLog -Path $LogFilePathName -Value ("    AAD WVD Users: " + $AADUsers.count) -color "Yellow"
+                                    WriteLog -Path $LogFilePathName -Value ("    WVD APP Users: " + $WVDAppUsers.count) -color "Yellow"
+                                    }else{
+                                        Write-host (" AAD WVD Users: " + $AADUsers.count) -Foregroundcolor "Yellow"
+                                        Write-host (" WVD APP Users: " + $WVDAppUsers.count) -Foregroundcolor "Yellow"
+                                    }
+                                    #As one of the two arrays could be empty, we also need to add workarounds in case that is so.. 
+                                    #The result of this part is two new arrays (or one depending on scenario) with objects: object.InputObject  == UPN
+                                    If ($WVDAppUsers -and $AADUsers){
+                                        [array]$UserSyncStatus = Compare-Object -ReferenceObject ($WVDAppUsers) -DifferenceObject ($AADUsers)
+                                        [array]$usersToDelete=$UserSyncStatus | where {$_.SideIndicator -eq '<='}
+                                        [array]$usersToAdd=$UserSyncStatus | where {$_.SideIndicator -eq '=>'}
+                                    }elseif ($WVDAppUsers -and (!($AADUsers))) {
+
+
+                                            
+                                        #WVD UPN's found, no AAD UPN's full delete
+                                        $Full=$true
+                                        WriteLog -Path $LogFilePathName -Value ("Full Delete of " + $WVDAppUsers.count + " wvd app users") -color "Yellow"
+                                        $usersToDelete = New-Object System.Collections.ArrayList
+                                        ForEach ($UPN in $WVDAppUsers) {
+                                            #RemoveUserFromWVDAPP
+                                            #RemoveUserFromApp -RDSTenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+                                            Remove-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+                                        }
+                                    }elseif ($AADUsers -and (!($WVDAppUsers))) {
+                                        #AAD UPN's found, and no WVD UPN's, full add
+                                        $Full=$true
+                                            WriteLog -Path $LogFilePathName -Value ("Full add of " + $AADUsers.count + " wvd app users") -color "Yellow"
+                                            ForEach ($UPN in $AADUsers) {
+                                                #AddUserToWVDAPP 
+                                                #AddUserToApp -RDSTenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+                                                WriteLog -Path $LogFilePathName -Value (" adding " + $UPN) -Color "Green"
+                                                Add-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+                                            }
+                                        }
+
+                                        #ACTUAL Adding  & Removal OF ACCOUNTS 
+                                    If ($usersToAdd) {
+                                        WriteLog -Path $LogFilePathName -Value ("Need to add " + $usersToAdd.count + " users")
+                                        ForEach ($UserUPN in $usersToAdd) {
+                                            WriteLog -Path $LogFilePathName -Value (" adding " + $UserUPN.InputObject) -Color "Green"
+                                            #Get The original object from AADUsers array - to be able to extract all required info
+                                            Add-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UserUPN.InputObject
+                                            Write-host "Next user" -ForegroundColor Green
+                                        }
+                                    }
+
+                                    If ($usersToDelete) {
+                                        WriteLog -Path $LogFilePathName -Value ("Need to remove " + $usersToDelete.count + " users from WVD App")
+                                        ForEach ($UserUPN in $usersToDelete) {
+                                            WriteLog -Path $LogFilePathName -Value (" removing " + $UserUPN.InputObject) -Color "Yellow"
+                                            #RemoveUserFromApp -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup -UserPrincipalName $UserUPN.InputObject
+                                            Remove-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UserUPN.InputObject
+
+                                        }
+                                    }
+                                        If (!($full) -and (!($usersToAdd)) -and (!($usersToDelete))) {
+                                            WriteLog -Path $LogFilePathName -Value (" ** $AppGroupName Fully Synchronized ** " ) -Color "Green"
+                                        }
+                              
+                                    
+                                    }else{
+                                        WriteLog -Path $LogFilePathName -Value ("Azure AD Group $AADGroup for $AppGroupName not found " ) -Color "Red"
+                                    }
+
+                                }
+                                
+
+                            write-host ""
+                            }                      
+                        }
+                    }
+                }
+            }
+        }
+}else{
+    #ManualRunWithManualInput
+    #AS Functions do not work with $AppLogins (Add-RDSConext errors occur on non-interactive logins), we have to repeat all of the above :( 
+    #Reset the arrays
+
+    $AADUsers=$null
+    $WVDAppUsers=$null
+
+
+
+    $AADUsers=GetAzureADGroupMembers -AADGroupName $AADGroup
+    [array]$WVDAppUsers=(Get-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName).UserPrincipalName
+    
+
+    If ($LogFilePathName) {
+    WriteLog -Path $LogFilePathName -Value ("    AAD WVD Users: " + $AADUsers.count) -color "Yellow"
+    WriteLog -Path $LogFilePathName -Value ("    WVD APP Users: " + $WVDAppUsers.count) -color "Yellow"
+    }else{
+        Write-host (" AAD WVD Users: " + $AADUsers.count) -Foregroundcolor "Yellow"
+        Write-host (" WVD APP Users: " + $WVDAppUsers.count) -Foregroundcolor "Yellow"
+    }
+    #As one of the two arrays could be empty, we also need to add workarounds in case that is so.. 
+    #The result of this part is two new arrays (or one depending on scenario) with objects: object.InputObject  == UPN
+    If ($WVDAppUsers -and $AADUsers){
+        [array]$UserSyncStatus = Compare-Object -ReferenceObject ($WVDAppUsers) -DifferenceObject ($AADUsers)
+        [array]$usersToDelete=$UserSyncStatus | where {$_.SideIndicator -eq '<='}
+        [array]$usersToAdd=$UserSyncStatus | where {$_.SideIndicator -eq '=>'}
+    }elseif ($WVDAppUsers -and (!($AADUsers))) {
+        #WVD UPN's found, no AAD UPN's full delete
+        $Full=$true
+        WriteLog -Path $LogFilePathName -Value ("Full Delete of " + $WVDAppUsers.count + " wvd app users") -color "Yellow"
+        $usersToDelete = New-Object System.Collections.ArrayList
+        ForEach ($UPN in $WVDAppUsers) {
+            #RemoveUserFromWVDAPP
+            #RemoveUserFromApp -RDSTenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+            Remove-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+        }
+    }elseif ($AADUsers -and (!($WVDAppUsers))) {
+        #AAD UPN's found, and no WVD UPN's, full add
+        $Full=$true
+            WriteLog -Path $LogFilePathName -Value ("Full add of " + $AADUsers.count + " wvd app users") -color "Yellow"
+            ForEach ($UPN in $AADUsers) {
+                #AddUserToWVDAPP 
+                #AddUserToApp -RDSTenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+                WriteLog -Path $LogFilePathName -Value (" adding " + $UPN) -Color "Green"
+                Add-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UPN
+            }
+        }
+
+        #ACTUAL Adding  & Removal OF ACCOUNTS 
+    If ($usersToAdd) {
+        WriteLog -Path $LogFilePathName -Value ("Need to add " + $usersToAdd.count + " users")
+        ForEach ($UserUPN in $usersToAdd) {
+            WriteLog -Path $LogFilePathName -Value (" adding " + $UserUPN.InputObject) -Color "Green"
+            #Get The original object from AADUsers array - to be able to extract all required info
+            Add-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UserUPN.InputObject
+            Write-host "Next user" -ForegroundColor Green
+        }
+    }
+
+    If ($usersToDelete) {
+        WriteLog -Path $LogFilePathName -Value ("Need to remove " + $usersToDelete.count + " users from WVD App")
+        ForEach ($UserUPN in $usersToDelete) {
+            WriteLog -Path $LogFilePathName -Value (" removing " + $UserUPN.InputObject) -Color "Yellow"
+            #RemoveUserFromApp -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup -UserPrincipalName $UserUPN.InputObject
+            Remove-RdsAppGroupUser -TenantName $TenantName -HostPoolName $HostPoolName -AppGroupName $AppGroupName -UserPrincipalName $UserUPN.InputObject
+
+        }
+    }
+        If (!($full) -and (!($usersToAdd)) -and (!($usersToDelete))) {
+            WriteLog -Path $LogFilePathName -Value (" ** $AppGroupName Fully Synchronized ** " ) -Color "Green"
+        }
+
+    
+
+
+
 }
+
+
+
+
+#ActualStartOfScript
+#Creating the two arrays to be used
+
+
+
+
 
 #Login to the local AD - and retrieve the users from the specified OU - based on GC (to make the query faster)
 #Next retrieve all B2B / guest users from AAD
 
-$AADUsers=GetAzureADGroupMembers -AADGroupName $AADGroup
-$WVDAppUsers=GetRDSAppMembers -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup
-
-WriteLog -Path $LogFilePathName -Value (" AAD WVD Users: " + $AADUsers.count) -color "Yellow"
-WriteLog -Path $LogFilePathName -Value (" WVD APP Users: " + $WVDAppUsers.count) -color "Yellow"
-
-Write-host ""
-#As one of the two arrays could be empty, we also need to add workarounds in case that is so.. 
-#The result of this part is two new arrays (or one depending on scenario) with objects: object.InputObject  == UPN
-If ($WVDAppUsers -and $AADUsers){
-    [array]$UserSyncStatus = Compare-Object -ReferenceObject ($WVDAppUsers) -DifferenceObject ($AADUsers)
-    [array]$usersToDelete=$UserSyncStatus | where {$_.SideIndicator -eq '<='}
-    [array]$usersToAdd=$UserSyncStatus | where {$_.SideIndicator -eq '=>'}
-}elseif ($WVDAppUsers -and (!($AADUsers))) {
-    #WVD UPN's found, no AAD UPN's full delete
-    $Full=$true
-    WriteLog -Path $LogFilePathName -Value ("Full Delete of " + $WVDAppUsers.count + " wvd app users") -color "Yellow"
-    $usersToDelete = New-Object System.Collections.ArrayList
-    ForEach ($UPN in $WVDAppUsers) {
-        #RemoveUserFromWVDAPP
-        RemoveUserFromApp -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup -UserPrincipalName $UPN
-    }
-}elseif ($AADUsers -and (!($WVDAppUsers))) {
-    #AAD UPN's found, and no WVD UPN's, full create
-    $Full=$true
-    WriteLog -Path $LogFilePathName -Value ("Full add of " + $AADUsers.count + " wvd app users") -color "Yellow"
-    ForEach ($UPN in $WVDAppUsers) {
-        #AddUserToWVDAPP 
-        AddUserToApp -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup -UserPrincipalName $UPN
-    }
-       
-}
-
-#ACTUAL Adding  & Removal OF ACCOUNTS 
-If ($usersToAdd) {
-    WriteLog -Path $LogFilePathName -Value ("Need to add " + $usersToAdd.count + " users")
-    ForEach ($UserUPN in $usersToAdd) {
-        WriteLog -Path $LogFilePathName -Value (" adding " + $UserUPN.InputObject) -Color "Green"
-        #Get The original object from AADUsers array - to be able to extract all required info
-        AddUserToApp -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup -UserPrincipalName $UserUPN.InputObject
-
-    Write-host "Next user" -ForegroundColor Green
-    }
-}
-
-If ($usersToDelete) {
-    WriteLog -Path $LogFilePathName -Value ("Need to remove " + $usersToDelete.count + " users from WVD App")
-    ForEach ($UserUPN in $usersToDelete) {
-        WriteLog -Path $LogFilePathName -Value (" removing " + $UserUPN.InputObject) -Color "Yellow"
-        RemoveUserFromApp -RDSTenantName $RDSTenantName -HostPoolName $HostPoolName -AppGroupName $WVDAppGroup -UserPrincipalName $UserUPN.InputObject
-
-    }
-}
-
-If (!($full) -and (!($usersToAdd)) -and (!($usersToDelete))) {
-    WriteLog -Path $LogFilePathName -Value (" ** Fully synchronized ** " ) -Color "Green"
-}
 write-host ""
 write-host ""
 write-host ""
