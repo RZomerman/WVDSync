@@ -127,7 +127,7 @@ If ($Provision) {
             exit    
         }
     
-        Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" 
+        $RDSContext=Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" 
         If (!($RDSContext.TenantGroupName)) {
             Write-HOST "ERROR LOGGING INTO RDS OR NO TENANT FOUND" -ForegroundColor "Red"
         }
