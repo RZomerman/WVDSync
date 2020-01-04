@@ -361,8 +361,8 @@ If ($Automated) {
                                     #The result of this part is two new arrays (or one depending on scenario) with objects: object.InputObject  == UPN
                                     If ($WVDAppUsers -and $AADUsers){
                                         [array]$UserSyncStatus = Compare-Object -ReferenceObject ($WVDAppUsers) -DifferenceObject ($AADUsers)
-                                        [array]$usersToDelete=$UserSyncStatus | where {$_.SideIndicator -eq '<='}
-                                        [array]$usersToAdd=$UserSyncStatus | where {$_.SideIndicator -eq '=>'}
+                                        [array]$usersToDelete=$UserSyncStatus | where {$_.SideIndicator -eq '=>'}
+                                        [array]$usersToAdd=$UserSyncStatus | where {$_.SideIndicator -eq '<='}
                                     }elseif ($WVDAppUsers -and (!($AADUsers))) {
 
 
@@ -452,8 +452,8 @@ If ($Automated) {
     #The result of this part is two new arrays (or one depending on scenario) with objects: object.InputObject  == UPN
     If ($WVDAppUsers -and $AADUsers){
         [array]$UserSyncStatus = Compare-Object -ReferenceObject ($WVDAppUsers) -DifferenceObject ($AADUsers)
-        [array]$usersToDelete=$UserSyncStatus | where {$_.SideIndicator -eq '<='}
-        [array]$usersToAdd=$UserSyncStatus | where {$_.SideIndicator -eq '=>'}
+        [array]$usersToDelete=$UserSyncStatus | where {$_.SideIndicator -eq '=>'}
+        [array]$usersToAdd=$UserSyncStatus | where {$_.SideIndicator -eq '<='}
     }elseif ($WVDAppUsers -and (!($AADUsers))) {
         #WVD UPN's found, no AAD UPN's full delete
         $Full=$true
