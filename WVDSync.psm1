@@ -60,13 +60,6 @@ Function GetAzureADGroupMembers ($AADGroupName){
     #Retrieves the members of an AAD group
     $AzureADGroup=Get-AzureADGroup | Where-Object DisplayName -eq $AADGroupName
 
-    #Need to validate if the group if an AD Sync'd group, else WVD would not work for this group! - may be removed if AAD-DS implementation is in place
-    If ( $AzureADGroup.DirSyncEnabled -ne "True") {
-        Write-Host "Input group is not AD Sync enabled - remove this function from psm1 file if using AAD-DS"
-        return $false
-    }
-    #End of statement that must be removed for AAD-DS implementations
-
     If (!($AzureADGroup)){
         return $false
     }else{
