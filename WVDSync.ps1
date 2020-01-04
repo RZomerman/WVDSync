@@ -1,21 +1,21 @@
 
 Param (
     [parameter()]
-    $AADGroup,
+    [string]$AADGroup,
     [parameter()]
-    $HostPoolName,
+    [string]$HostPoolName,
     [parameter()]
-    $AppGroupName,
+    [string]$AppGroupName,
     [parameter()]
-    $TenantName,
+    [string]$TenantName,
     [parameter()]
-    $Login,
+    [boolean]$Login,
     [parameter()]
-    $Provision,
+    [boolean]$Provision,
     [parameter()]
-    $Automated,
+    [boolean]$Automated,
     [parameter()]
-    $ApplicationId
+    [string]$ApplicationId
 ) 
 
 
@@ -62,6 +62,10 @@ If ($ApplicationId) {
     $Automated = $true
 }
 
+Import-Module .\WVDSync.psm1
+write-host ""
+write-host ""
+
 #Cosmetic stuff
 write-host ""
 write-host ""
@@ -75,11 +79,10 @@ write-host "     "
 write-host "This script reads the input groupname and validates / synchronizes WVD Membership" -ForegroundColor Green
 
 
+#Fixed Variables used in this script
+$DesktopApplicationGroup="WVDDesktopUsers" #ThisIsThePrefix for the Destop Application Users - script will look for HostPool-WVDDesktopUsers group in AD (so you can create different groups for each hostpool)
 
-$DesktopApplicationGroup="WVDDesktopUsers"
-
-#Importing the functions module and primary modules for AAD and AD
-Import-Module .\WVDSync.psm1
+#Importing the functions module and primary modules for AAD and RDS
 If (!((LoadModule -name AzureAD))){
     Write-host "AzureAD Module was not found - cannot continue - please install the module with Install-Module AzureAD"
     Exit
@@ -99,15 +102,11 @@ If (!((LoadModule -name Microsoft.RDInfra.RDPowershell))){
     ActivateLogFile -LogFilePath $LogFilePathName
 
 
-
-
-
-    #ProvisionAADServiceAccount
-    #THIS NEEDS TO BE ADJUSTED TO ALLOW FOR MULTIPLE GROUPS TO BE ADDED TO THE SAME SCRIPT - PERHAPS A CONFIG FILE?
 If ($Provision) {
-    #CANNOT PROVISION THIS SCRIPT YET
-    #Write-host "ILLEGAL OPTION"
-    #Exit
+<#This will create a local certificate in your computer, a a new application in your AAD, grant it AAD Reader rights, set the application as RDS Owner (Task Scheduler has been disabled, but can also be enabled)
+    The output will include an applicationID (AppID) – take note of this GUID value
+    This option can be re-run as many times as you want. Old applications, certificates will be removed when found.
+#>
 
     #Need to catch if powershell is open in admin mode (as script provisions Certificates in local machine and scheduled task)
     if (!([bool](([System.Security.Principal.WindowsIdentity]::GetCurrent()).groups -match "S-1-5-32-544"))){
@@ -127,8 +126,8 @@ If ($Provision) {
             exit    
         }
     
-        $RDSContext=Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" 
-        If (!($RDSContext.TenantGroupName)) {
+        Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" 
+        If (!((Get-RDSContext).TenantGroupName)) {
             Write-HOST "ERROR LOGGING INTO RDS OR NO TENANT FOUND" -ForegroundColor "Red"
         }
         Write-host ("Tenant Group:" + $RDSContext.TenantGroupName)
@@ -156,7 +155,7 @@ If ($Provision) {
     }
 
     # Create the self signed cert
-    Write-Host "Generating Certificate"
+    WriteLog -Path $LogFilePathName -Value ("Generating Certificate")
     $currentDate = Get-Date
     $endDate  = $currentDate.AddYears(1)
     $notAfter  = $endDate.AddYears(1)
@@ -170,11 +169,16 @@ If ($Provision) {
     $keyValue = [System.Convert]::ToBase64String($cert.GetRawCertData())
 
 
-    # Create the Azure Active Directory Application
-    Write-Host "Creating Service Principle"
-    $application = New-AzureADApplication -DisplayName "WVDSyncScript"
+    #Providing read access to the certificate for the currently logged-in user (to allow running the script from non-admin prompt)
     
+    $CurrentUser=whoami
+    WriteLog -Path $LogFilePathName -Value ("Adding read permissions to certificate for current $CurrentUser")
+    Add-CertificatePermission -userName $CurrentUser -permission read -certStoreLocation 'localmachine\my' -certThumbprint $thumb
 
+    
+    # Create the Azure Active Directory Application
+    WriteLog -Path $LogFilePathName -Value ("Creating Service Principle")
+    $application = New-AzureADApplication -DisplayName "WVDSyncScript"
     New-AzureADApplicationKeyCredential -ObjectId $application.ObjectId -CustomKeyIdentifier "WVDSyncScript" -StartDate $currentDate -EndDate $endDate -Type AsymmetricX509Cert -Usage Verify -Value $keyValue
 
     # Create the Service Principal and connect it to the Application
@@ -191,6 +195,7 @@ If ($Provision) {
     {
         # Sleep here for a few seconds to allow the service principal application to become active (should only take a couple of seconds normally)
         Add-AzureADDirectoryRoleMember -ObjectId $DirectoryReaders.ObjectId -RefObjectId $sp.ObjectId | Write-Verbose -ErrorAction SilentlyContinue
+        WriteLog -Path $LogFilePathName -Value ("Added SP to AAD Directory Readers")
         $NewRole = ((Get-AzureADDirectoryRoleMember -ObjectId $DirectoryReaders.ObjectId).objectID -contains $sp.ObjectId)
         $Retries++;
         write-host "waiting for SP to be added to group"                
@@ -198,7 +203,8 @@ If ($Provision) {
 
      }
 
-    Write-host "Provining Admin access to SP in RDS"
+    
+    WriteLog -Path $LogFilePathName -Value ("Provining Admin access to SP in RDS")
     $NewRDSRole = $null
     $Retries = 0;
     While ($NewRDSRole -eq $null -and $Retries -le 6) {
@@ -226,18 +232,15 @@ If ($Provision) {
      }
     
 
-    # Get Tenant Detail
-
-    # Now you can login to Azure PowerShell with your Service Principal and Certificate
     #Register a scheduled task
-    Write-Host $application.AppId
+
+
     $AppID=$application.AppId
     $arguments=" -NoProfile -command & '$workingDirectory + \WVDSync.ps1' -ApplicationId $AppID"
-    Write-host "Creating Scheduled Task with Arguments:"
-    write-host $arguments
-
-
-    
+#    WriteLog -Path $LogFilePathName -Value ("Creating Scheduled Task with Arguments:") -color "Yellow" 
+    WriteLog -Path $LogFilePathName -Value ($arguments) -color "Yellow" 
+    WriteLog -Path $LogFilePathName -Value ("*************************************************") -color "Yellow" 
+    WriteLog -Path $LogFilePathName -Value ("ApplicationID == $AppID") -color "Yellow" 
 
     $action = New-ScheduledTaskAction -Execute 'Powershell.exe' -Argument $arguments
     $trigger =  New-ScheduledTaskTrigger -Daily -At 3am
@@ -268,14 +271,12 @@ If ($Login -and (!($Automated))) {
 
 
 
-
 #IF running automated, the stored certificate will be used to authenicate and get the AAD Tenant. The variable -ApplicationID is used for the Service Principal.
 If ($Automated) {
-
-        #CANNOT PROVISION THIS SCRIPT YET
-        #Write-host "ILLEGAL OPTION"
-        #Exit
-    #If using service principal, need to login with SP
+<#
+    This will run in fully automated mode. It will run through all your tenants, all your hostgroups and all your applicationGroups.
+    It will read the applicationGroup.Description field and if the descriptionfield == AADGroupName it will synchronize the users (remove/add)
+#>
     
     If (!($ApplicationId)){
         Write-host "No ApplicationID found - exit"
@@ -285,8 +286,8 @@ If ($Automated) {
     $thumb = $cert.Thumbprint
     $tenantObjectID=$cert.DnsNameList.unicode 
     Connect-AzureAD -TenantId $tenantObjectID -ApplicationId $ApplicationId -CertificateThumbprint $thumb
-    $RDSContext=Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" -ApplicationId  $ApplicationId -CertificateThumbprint $thumb -AadTenantId $tenantObjectID
-    If (!($RDSContext)) {
+    Add-RdsAccount -DeploymentUrl "https://rdbroker.wvd.microsoft.com" -ApplicationId  $ApplicationId -CertificateThumbprint $thumb -AadTenantId $tenantObjectID
+    If (!((Get-RDSContext).TenantGroupName)) {
         WriteLog -Path $LogFilePathName -Value ("ERROR LOGING IN AS APP ID") -color "Red" 
         exit
     }
@@ -335,7 +336,8 @@ If ($Automated) {
                                 WriteLog -Path $LogFilePathName -Value ("Application $AppGroupName does not have a description") -color "Yellow" 
                                 continue
                             }else{
-                                If ($AADGroup -eq 'The default desktop application group for the session host pool'){$AADGroup=$DesktopApplicationGroup}    
+                                #script will look for HostPool-WVDDesktopUsers group in AD (so you can create different groups for each hostpool)
+                                If ($AADGroup -eq 'The default desktop application group for the session host pool'){$AADGroup=($HostGroup.HostPoolName + "-" + $DesktopApplicationGroup)}    
                                 WriteLog -Path $LogFilePathName -Value ("  -validating AAD Group: $AADGroup ") -color "Yellow" 
                                 If (Validate-AADGroup -Group $AADGroup) {
                                     
@@ -504,18 +506,6 @@ If ($Automated) {
 
 }
 
-
-
-
-#ActualStartOfScript
-#Creating the two arrays to be used
-
-
-
-
-
-#Login to the local AD - and retrieve the users from the specified OU - based on GC (to make the query faster)
-#Next retrieve all B2B / guest users from AAD
 
 write-host ""
 write-host ""
