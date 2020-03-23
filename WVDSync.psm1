@@ -58,7 +58,7 @@ Function GetRDSAppMembers ($RDSTenantName, $HostPoolName, $AppGroupName) {
 }
 Function GetAzureADGroupMembers ($AADGroupName){
     #Retrieves the members of an AAD group
-    $AzureADGroup=Get-AzureADGroup | Where-Object DisplayName -eq $AADGroupName
+    $AzureADGroup=Get-AzureADGroup -searchstring $AADGroupName
 
     If (!($AzureADGroup)){
         return $false
@@ -185,7 +185,7 @@ Function GeneratePassword2{
 }
 
 Function Validate-AADGroup ($Group) {
-    $AzureADGroup=Get-AzureADGroup | Where-Object DisplayName -eq $Group
+    $AzureADGroup=Get-AzureADGroup -searchstring $Group
     If ($AzureADGroup) {
         return $true
     }else{
